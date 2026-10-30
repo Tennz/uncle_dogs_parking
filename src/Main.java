@@ -29,6 +29,16 @@ public final class Main {
             AppConfig config=AppConfig.load(Path.of("config.txt"));
             boolean vercelDeployment=AppConfig.isVercelDeployment();
             String databaseUrl=config.get("DATABASE_URL","");
+            if(vercelDeployment){
+                // Log which env vars are present (never log values) to help diagnose misconfiguration.
+                System.out.println("[ENV] Vercel deployment detected. Environment variable status:");
+                System.out.println("[ENV]   DATABASE_URL      : "+(databaseUrl.isBlank()?"MISSING — required":"set ("+databaseUrl.length()+" chars)"));
+                System.out.println("[ENV]   DATABASE_USER     : "+(config.get("DATABASE_USER","").isBlank()?"not set (will use embedded credentials if present)":"set"));
+                System.out.println("[ENV]   DATABASE_PASSWORD : "+(config.get("DATABASE_PASSWORD","").isBlank()?"not set (will use embedded credentials if present)":"set"));
+                System.out.println("[ENV]   ADMIN_KEY         : "+(config.get("ADMIN_KEY","").isBlank()?"MISSING — required":"set"));
+                System.out.println("[ENV]   SESSION_SECRET    : "+(config.get("SESSION_SECRET","").isBlank()?"not set (will fall back to ADMIN_KEY for session signing)":"set"));
+                System.out.println("[ENV]   PORT              : "+config.get("PORT","80 (default)"));
+            }
             if(vercelDeployment&&databaseUrl.isBlank())throw new IllegalStateException("Vercel deployment requires DATABASE_URL. Configure your existing Supabase PostgreSQL connection in Vercel Environment Variables.");
             if(vercelDeployment&&config.get("ADMIN_KEY","").isBlank())throw new IllegalStateException("Vercel deployment requires ADMIN_KEY in Vercel Environment Variables. Do not rely on a local admin.key file.");
             String adminKey=config.getOrCreateAdminKey();
@@ -66,12 +76,13 @@ public final class Main {
             String lanUrl="http://"+lanIp+":"+port;
             String baseUrl=config.baseUrl();
             if(baseUrl.isBlank()&&!vercelDeployment)baseUrl=lanUrl;
-            ParkingServer server=new ParkingServer(lot,port,baseUrl,adminKey);
+            String sessionSecret=config.get("SESSION_SECRET","");
+            ParkingServer server=new ParkingServer(lot,port,baseUrl,adminKey,sessionSecret);
             server.start();
             if(!vercelDeployment)startReservationExpiryMaintenance(lot);
             System.out.println();
             System.out.println("===============================================");
-            System.out.println(" Uncle Dogs Parking is running · Version 1.8.3");
+            System.out.println(" Uncle Dogs Parking is running · Version 1.8.4");
             if(baseUrl.isBlank()&&vercelDeployment)System.out.println(" Public URL: detected from the HTTPS request hostname");
             else System.out.println(" Website base URL: "+baseUrl);
             if(!vercelDeployment){

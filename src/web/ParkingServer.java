@@ -36,12 +36,20 @@ public final class ParkingServer {
     private final int port;
     private final String baseUrl;
     private final byte[] adminKey;
+    /** Separate HMAC key for user session tokens. Falls back to adminKey when SESSION_SECRET is not set. */
+    private final byte[] sessionKey;
     private final ConcurrentHashMap<String,FailureWindow> failures=new ConcurrentHashMap<>();
     private HttpServer server;
 
     public ParkingServer(ParkingLot lot,int port,String baseUrl,String adminKey){
-        this.lot=lot;this.port=port;this.baseUrl=baseUrl;this.adminKey=(adminKey==null?"":adminKey).getBytes(StandardCharsets.UTF_8);
+        this(lot,port,baseUrl,adminKey,null);
+    }
+    public ParkingServer(ParkingLot lot,int port,String baseUrl,String adminKey,String sessionSecret){
+        this.lot=lot;this.port=port;this.baseUrl=baseUrl;
+        this.adminKey=(adminKey==null?"":adminKey).getBytes(StandardCharsets.UTF_8);
         if(this.adminKey.length<16)throw new IllegalArgumentException("ADMIN_KEY must contain at least 16 characters.");
+        byte[] sk=(sessionSecret==null||sessionSecret.isBlank())?null:sessionSecret.getBytes(StandardCharsets.UTF_8);
+        this.sessionKey=(sk!=null&&sk.length>=16)?sk:this.adminKey;
     }
 
     public void start() throws IOException {
@@ -67,7 +75,7 @@ public final class ParkingServer {
             if(path.equals("/")&&method.equals("GET")){if(lot.isInitialized()){try{lot.processExpirations();}catch(Exception ignored){}}html(ex,200,PageBuilder.build(requestBaseUrl(ex)));return;}
             if(!path.startsWith("/api/")){json(ex,404,map("message","Page not found."));return;}
             if(path.startsWith("/api/")&&isPrefetch(ex)&&path.equals("/api/scan")){json(ex,200,map("ignored",true,"message","Preview requests do not perform parking actions. Open the site and use Scan QR."));return;}
-            if(!lot.isInitialized()){try{lot.ensureInitialized();}catch(Exception dbError){safeJson(ex,503,map("message","The database is not yet available. Please try again in a moment.","retryable",true));return;}}
+            if(!lot.isInitialized()){try{lot.ensureInitialized();}catch(Exception dbError){System.err.println("[DB] Request blocked â€” database not initialized: "+dbError.getClass().getSimpleName()+": "+dbError.getMessage());safeJson(ex,503,map("message","The database is not yet available. Please try again in a moment.","retryable",true));return;}}
             try{lot.processExpirations();}catch(Exception ignored){}
             routeApi(ex,path,method);
         } catch (IllegalArgumentException e) {safeJson(ex,400,map("message",friendly(e)));}
@@ -172,10 +180,10 @@ public final class ParkingServer {
         if(!MessageDigest.isEqual(adminKey,candidate)){fail(ip,"admin");throw new SecurityException("The admin key is incorrect.");}
         clearFailures(ip,"admin");Instant expires=Instant.now().plus(SESSION_LIFETIME);String token=signToken("ADMIN",Long.toString(expires.getEpochSecond()));setCookie(ex,"UDP_ADMIN",token,SESSION_LIFETIME.toSeconds());json(ex,200,map("ok",true));
     }
-    // [ENCAPSULATION] Signed cookies keep authentication valid across stateless Vercel instances without in-memory sessions.
-    private void establishUserSession(HttpExchange ex,long userId){Instant expires=Instant.now().plus(SESSION_LIFETIME);String token=signToken("USER",userId+":"+expires.getEpochSecond());setCookie(ex,"UDP_SESSION",token,SESSION_LIFETIME.toSeconds());}
+    // Signed cookies keep authentication valid across stateless Vercel instances without in-memory sessions.
+    private void establishUserSession(HttpExchange ex,long userId){Instant expires=Instant.now().plus(SESSION_LIFETIME);String token=signSessionToken("USER",userId+":"+expires.getEpochSecond());setCookie(ex,"UDP_SESSION",token,SESSION_LIFETIME.toSeconds());}
     private UserSession currentUser(HttpExchange ex){
-        String payload=verifyToken("USER",cookie(ex,"UDP_SESSION"));if(payload==null)return null;
+        String payload=verifySessionToken("USER",cookie(ex,"UDP_SESSION"));if(payload==null)return null;
         String[] parts=payload.split(":",-1);if(parts.length!=2)return null;
         try{long userId=Long.parseLong(parts[0]);Instant expires=Instant.ofEpochSecond(Long.parseLong(parts[1]));if(userId<1||!Instant.now().isBefore(expires))return null;return new UserSession(userId,expires);}catch(RuntimeException invalid){return null;}
     }
@@ -184,20 +192,37 @@ public final class ParkingServer {
     private String signToken(String purpose,String payload){
         String encoded=Base64.getUrlEncoder().withoutPadding().encodeToString(payload.getBytes(StandardCharsets.UTF_8));
         String message=purpose+"."+encoded;
-        String signature=Base64.getUrlEncoder().withoutPadding().encodeToString(hmac(message));
+        String signature=Base64.getUrlEncoder().withoutPadding().encodeToString(hmac(adminKey,message));
+        return encoded+"."+signature;
+    }
+    /** Signs user session tokens using SESSION_SECRET (or adminKey as fallback). */
+    private String signSessionToken(String purpose,String payload){
+        String encoded=Base64.getUrlEncoder().withoutPadding().encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+        String message=purpose+"."+encoded;
+        String signature=Base64.getUrlEncoder().withoutPadding().encodeToString(hmac(sessionKey,message));
         return encoded+"."+signature;
     }
     private String verifyToken(String purpose,String token){
         if(token==null||token.length()>512)return null;
         String[] parts=token.split("\\.",-1);if(parts.length!=2)return null;
         try{
-            byte[] supplied=Base64.getUrlDecoder().decode(parts[1]);byte[] expected=hmac(purpose+"."+parts[0]);
+            byte[] supplied=Base64.getUrlDecoder().decode(parts[1]);byte[] expected=hmac(adminKey,purpose+"."+parts[0]);
             if(!MessageDigest.isEqual(supplied,expected))return null;
             return new String(Base64.getUrlDecoder().decode(parts[0]),StandardCharsets.UTF_8);
         }catch(IllegalArgumentException invalid){return null;}
     }
-    private byte[] hmac(String message){
-        try{Mac mac=Mac.getInstance("HmacSHA256");mac.init(new SecretKeySpec(adminKey,"HmacSHA256"));return mac.doFinal(message.getBytes(StandardCharsets.UTF_8));}
+    /** Verifies user session tokens using SESSION_SECRET (or adminKey as fallback). */
+    private String verifySessionToken(String purpose,String token){
+        if(token==null||token.length()>512)return null;
+        String[] parts=token.split("\\.",-1);if(parts.length!=2)return null;
+        try{
+            byte[] supplied=Base64.getUrlDecoder().decode(parts[1]);byte[] expected=hmac(sessionKey,purpose+"."+parts[0]);
+            if(!MessageDigest.isEqual(supplied,expected))return null;
+            return new String(Base64.getUrlDecoder().decode(parts[0]),StandardCharsets.UTF_8);
+        }catch(IllegalArgumentException invalid){return null;}
+    }
+    private static byte[] hmac(byte[] key,String message){
+        try{Mac mac=Mac.getInstance("HmacSHA256");mac.init(new SecretKeySpec(key,"HmacSHA256"));return mac.doFinal(message.getBytes(StandardCharsets.UTF_8));}
         catch(java.security.GeneralSecurityException e){throw new IllegalStateException("Secure session verification is unavailable.",e);}
     }
     private String requestBaseUrl(HttpExchange ex){
@@ -313,7 +338,7 @@ public final class ParkingServer {
         String safeHelp=htmlEscape(help==null?"":help),safeError=htmlEscape(error==null?"":error);
         String title=enter?"Enter Slot "+slot:"Leave Slot "+slot;
         String button=enter?"Confirm Entry":"Confirm Leave";
-        String page="<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#111111'><title>"+title+" · Uncle Dogs Parking v1.8.3</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#f7f7f7;font:16px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;padding:16px}.card{max-width:470px;width:100%;background:#1d1d20;border:1px solid #3d3d42;border-radius:24px;padding:clamp(20px,5vw,30px);box-shadow:0 20px 70px #0008;text-align:center}.logo{width:92px;height:92px;object-fit:contain;border-radius:18px;margin-bottom:12px}.mark{font-size:12px;letter-spacing:.12em;color:#bbb;text-transform:uppercase}.title{font-size:clamp(27px,6vw,34px);line-height:1.12;margin:12px 0;color:#f4f4f5}.message{color:#dedee2;background:#26262b;border:1px solid #44444b;border-radius:12px;padding:12px;margin:14px 0;text-align:left;font-size:14px}.error{color:#ffd4d4;background:#421f24;border-color:#74333c}.field{text-align:left;margin:15px 0}.field label{display:block;font-weight:750;font-size:14px;margin-bottom:7px}.field input{width:100%;padding:14px;border-radius:12px;border:1px solid #555;background:#111;color:#fff;font:inherit;text-transform:uppercase}.btn{display:block;width:100%;border:0;background:#f5f5f5;color:#111;text-decoration:none;font-weight:850;border-radius:12px;padding:14px 18px;margin-top:18px;font:inherit;cursor:pointer}.sub{font-size:12px;color:#aaa;margin-top:16px}.back{display:inline-block;margin-top:15px;color:#ddd}</style><main class='card'><img class='logo' src='/assets/logo.jpg' alt='Uncle Dogs Parking'><div class='mark'>Uncle Dogs Parking · Version 1.8.3</div><h1 class='title'>"+htmlEscape(title)+"</h1><p class='message'>"+safeHelp+"</p>"+(safeError.isBlank()?"":"<p class='message error' role='alert'>"+safeError+"</p>")+"<form method='post' action='/"+action.toLowerCase()+"/"+slot+"' autocomplete='on'><div class='field'><label for='plate'>Vehicle plate number</label><input id='plate' name='plate' required maxlength='15' autocomplete='off' placeholder='e.g. ABC 1234' pattern='[A-Za-z0-9 -]{2,15}' autocapitalize='characters'></div><button class='btn' type='submit'>"+button+"</button></form><div class='sub'>The server verifies the plate against the reservation or active parking record. No action is saved until it matches.</div><a class='back' href='/'>Open parking dashboard</a></main></html>";
+        String page="<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#111111'><title>"+title+" Â· Uncle Dogs Parking v1.8.4</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#f7f7f7;font:16px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;padding:16px}.card{max-width:470px;width:100%;background:#1d1d20;border:1px solid #3d3d42;border-radius:24px;padding:clamp(20px,5vw,30px);box-shadow:0 20px 70px #0008;text-align:center}.logo{width:92px;height:92px;object-fit:contain;border-radius:18px;margin-bottom:12px}.mark{font-size:12px;letter-spacing:.12em;color:#bbb;text-transform:uppercase}.title{font-size:clamp(27px,6vw,34px);line-height:1.12;margin:12px 0;color:#f4f4f5}.message{color:#dedee2;background:#26262b;border:1px solid #44444b;border-radius:12px;padding:12px;margin:14px 0;text-align:left;font-size:14px}.error{color:#ffd4d4;background:#421f24;border-color:#74333c}.field{text-align:left;margin:15px 0}.field label{display:block;font-weight:750;font-size:14px;margin-bottom:7px}.field input{width:100%;padding:14px;border-radius:12px;border:1px solid #555;background:#111;color:#fff;font:inherit;text-transform:uppercase}.btn{display:block;width:100%;border:0;background:#f5f5f5;color:#111;text-decoration:none;font-weight:850;border-radius:12px;padding:14px 18px;margin-top:18px;font:inherit;cursor:pointer}.sub{font-size:12px;color:#aaa;margin-top:16px}.back{display:inline-block;margin-top:15px;color:#ddd}</style><main class='card'><img class='logo' src='/assets/logo.jpg' alt='Uncle Dogs Parking'><div class='mark'>Uncle Dogs Parking Â· Version 1.8.4</div><h1 class='title'>"+htmlEscape(title)+"</h1><p class='message'>"+safeHelp+"</p>"+(safeError.isBlank()?"":"<p class='message error' role='alert'>"+safeError+"</p>")+"<form method='post' action='/"+action.toLowerCase()+"/"+slot+"' autocomplete='on'><div class='field'><label for='plate'>Vehicle plate number</label><input id='plate' name='plate' required maxlength='15' autocomplete='off' placeholder='e.g. ABC 1234' pattern='[A-Za-z0-9 -]{2,15}' autocapitalize='characters'></div><button class='btn' type='submit'>"+button+"</button></form><div class='sub'>The server verifies the plate against the reservation or active parking record. No action is saved until it matches.</div><a class='back' href='/'>Open parking dashboard</a></main></html>";
         html(ex,200,page);
     }
     private static String durationLabel(long seconds) {
@@ -324,11 +349,11 @@ public final class ParkingServer {
     private static void qrPage(HttpExchange ex,int status,String title,String message,String linkLabel,String link,boolean success)throws IOException{
         String safeTitle=htmlEscape(title),safeMessage=htmlEscape(message),safeLabel=htmlEscape(linkLabel),safeLink=htmlEscape(link);
         String color=success?"#177245":"#b4232b";
-        String page="<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#111111'><title>"+safeTitle+" · Uncle Dogs Parking v1.8.3</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#f7f7f7;font:16px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif;padding:22px}.card{max-width:520px;width:100%;background:#1d1d20;border:1px solid #3d3d42;border-radius:24px;padding:28px;box-shadow:0 20px 70px #0008;text-align:center}.logo{width:100px;height:100px;object-fit:contain;border-radius:18px;margin-bottom:12px}.mark{font-size:12px;letter-spacing:.15em;color:#bbb;text-transform:uppercase}.title{font-size:clamp(27px,6vw,36px);line-height:1.12;margin:12px 0;color:"+color+"}.message{color:#dedee2;margin:12px 0 22px}.btn{display:inline-block;background:#f5f5f5;color:#111;text-decoration:none;font-weight:800;border-radius:12px;padding:12px 18px}.sub{font-size:12px;color:#aaa;margin-top:18px}</style><main class='card'><img class='logo' src='/assets/logo.jpg' alt='Uncle Dogs Parking'><div class='mark'>Uncle Dogs Parking · Version 1.8.3</div><h1 class='title'>"+safeTitle+"</h1><p class='message'>"+safeMessage+"</p><a class='btn' href='"+safeLink+"'>"+safeLabel+"</a><div class='sub'>Parking records are updated only after the server confirms the action.</div></main></html>";
+        String page="<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#111111'><title>"+safeTitle+" Â· Uncle Dogs Parking v1.8.4</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111;color:#f7f7f7;font:16px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif;padding:22px}.card{max-width:520px;width:100%;background:#1d1d20;border:1px solid #3d3d42;border-radius:24px;padding:28px;box-shadow:0 20px 70px #0008;text-align:center}.logo{width:100px;height:100px;object-fit:contain;border-radius:18px;margin-bottom:12px}.mark{font-size:12px;letter-spacing:.15em;color:#bbb;text-transform:uppercase}.title{font-size:clamp(27px,6vw,36px);line-height:1.12;margin:12px 0;color:"+color+"}.message{color:#dedee2;margin:12px 0 22px}.btn{display:inline-block;background:#f5f5f5;color:#111;text-decoration:none;font-weight:800;border-radius:12px;padding:12px 18px}.sub{font-size:12px;color:#aaa;margin-top:18px}</style><main class='card'><img class='logo' src='/assets/logo.jpg' alt='Uncle Dogs Parking'><div class='mark'>Uncle Dogs Parking Â· Version 1.8.4</div><h1 class='title'>"+safeTitle+"</h1><p class='message'>"+safeMessage+"</p><a class='btn' href='"+safeLink+"'>"+safeLabel+"</a><div class='sub'>Parking records are updated only after the server confirms the action.</div></main></html>";
         html(ex,status,page);
     }
     private static String htmlEscape(String s){return String.valueOf(s==null?"":s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;");}
-    private static void neutralLegacyPage(HttpExchange ex)throws IOException{html(ex,200,"<!doctype html><html><meta name='viewport' content='width=device-width, initial-scale=1'><title>Uncle Dogs Parking</title><body style='font:16px system-ui;max-width:540px;margin:48px auto;padding:18px'><h1>Uncle Dogs Parking</h1><p>Use the latest QR labels from Version 1.8.3. The new ENTER and LEAVE codes open this website directly.</p><p><a href='/'>Open the parking website</a></p></body></html>");}
+    private static void neutralLegacyPage(HttpExchange ex)throws IOException{html(ex,200,"<!doctype html><html><meta name='viewport' content='width=device-width, initial-scale=1'><title>Uncle Dogs Parking</title><body style='font:16px system-ui;max-width:540px;margin:48px auto;padding:18px'><h1>Uncle Dogs Parking</h1><p>Use the latest QR labels from Version 1.8.4. The new ENTER and LEAVE codes open this website directly.</p><p><a href='/'>Open the parking website</a></p></body></html>");}
     private void handleReadyz(HttpExchange ex) throws IOException {
         if(!lot.isInitialized()){try{lot.ensureInitialized();}catch(Exception e){json(ex,503,map("status","unavailable","db","unreachable"));return;}}
         try{lot.processExpirations();json(ex,200,map("status","ready","db",lot.getStorage().isRemoteDatabase()?"postgresql":"csv","time",Instant.now().toString()));}
@@ -353,3 +378,4 @@ public final class ParkingServer {
     private record UserSession(long userId,Instant expiresAt){}
     private static final class FailureWindow{final Instant windowStart;int count;Instant blockedUntil;FailureWindow(Instant start,int count,Instant blocked){windowStart=start;this.count=count;blockedUntil=blocked;}}
 }
+

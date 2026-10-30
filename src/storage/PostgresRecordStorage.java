@@ -10,7 +10,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** Hosted PostgreSQL storage. All state-changing operations use database transactions. */
-// [POLYMORPHISM] This hosted-database implementation can replace FileRecordStorage without changing business logic.
 public final class PostgresRecordStorage implements RecordStorage {
     private final String url;
     private final String transactionFallbackUrl;
@@ -53,15 +52,28 @@ public final class PostgresRecordStorage implements RecordStorage {
         }
         if (!value.startsWith("jdbc:postgresql://")) throw new IllegalArgumentException("DATABASE_URL must be a PostgreSQL or JDBC PostgreSQL URL from Supabase.");
         if (!value.contains("sslmode=")) value += value.contains("?") ? "&sslmode=require" : "?sslmode=require";
-        if (!value.contains("connectTimeout=")) value += value.contains("?") ? "&connectTimeout=8" : "?connectTimeout=8";
-        if (!value.contains("socketTimeout=")) value += value.contains("?") ? "&socketTimeout=15" : "?socketTimeout=15";
+        // Transaction pooler (PgBouncer port 6543) requires disabling JDBC server-side prepared statements.
+        if (!value.contains("prepareThreshold=") && isTransactionPoolerUrl(value)) {
+            value += value.contains("?") ? "&prepareThreshold=0" : "?prepareThreshold=0";
+        }
+        if (!value.contains("connectTimeout=")) value += value.contains("?") ? "&connectTimeout=10" : "?connectTimeout=10";
+        if (!value.contains("socketTimeout=")) value += value.contains("?") ? "&socketTimeout=30" : "?socketTimeout=30";
         if (!value.contains("tcpKeepAlive=")) value += value.contains("?") ? "&tcpKeepAlive=true" : "?tcpKeepAlive=true";
         return new ParsedConnection(value, actualUser, actualPassword);
     }
 
+    private static boolean isTransactionPoolerUrl(String jdbcUrl) {
+        int authorityStart = "jdbc:postgresql://".length();
+        int pathStart = jdbcUrl.indexOf('/', authorityStart);
+        if (pathStart < 0) return false;
+        String authority = jdbcUrl.substring(authorityStart, pathStart);
+        return authority.toLowerCase(java.util.Locale.ROOT).contains(".pooler.supabase.com")
+                && authority.endsWith(":6543");
+    }
+
     static String buildTransactionFallback(String jdbcUrl) {
-        // [ROBUSTNESS] If the Supabase session pooler (5432) is blocked, try its transaction pooler (6543).
-        // The alternate is only constructed for Supabase's shared pooler, never for a direct database host.
+        // If the Supabase session pooler (5432) is blocked, try the transaction pooler (6543).
+        // Only constructed for Supabase shared pooler; never rewrites a direct database host.
         int authorityStart = "jdbc:postgresql://".length();
         int pathStart = jdbcUrl.indexOf('/', authorityStart);
         if (!jdbcUrl.startsWith("jdbc:postgresql://") || pathStart < 0) return null;
@@ -85,28 +97,104 @@ public final class PostgresRecordStorage implements RecordStorage {
         try {
             return openConnection(selected);
         } catch (SQLException firstFailure) {
+            logConnectionFailure(selected, firstFailure);
             if (!selected.equals(url) || transactionFallbackUrl == null || !isConnectivityFailure(firstFailure)) {
                 throw firstFailure;
             }
-            System.err.println("[Supabase] Session pooler connection failed. Trying the shared transaction pooler on port 6543.");
-            System.err.println("[Supabase] Transaction mode disables JDBC server-side prepared statements; the app is configured for this mode.");
+            System.err.println("[DB] Session pooler connection failed. Retrying on shared transaction pooler (port 6543).");
+            System.err.println("[DB] Transaction mode requires prepareThreshold=0; this is configured automatically.");
             try {
                 Connection connection = openConnection(transactionFallbackUrl);
                 activeUrl = transactionFallbackUrl;
                 if (!announcedTransactionFallback) {
                     announcedTransactionFallback = true;
-                    System.out.println("[Supabase] Connected using the transaction pooler on port 6543.");
+                    System.out.println("[DB] Connected via transaction pooler (port 6543). prepareThreshold=0 is active.");
                 }
                 return connection;
             } catch (SQLException fallbackFailure) {
+                logConnectionFailure(transactionFallbackUrl, fallbackFailure);
                 firstFailure.addSuppressed(fallbackFailure);
                 throw new SQLException(
-                        "Supabase could not be reached through either shared pooler port 5432 or 6543. " +
-                        "Check the exact host and username in Supabase Connect, make sure the project is active, " +
-                        "then run check-supabase.bat. If both ports fail on this Wi-Fi, test using a phone hotspot. " +
-                        "The password was not validated because the network/SSL connection did not complete.",
+                        "Supabase could not be reached on either shared pooler port 5432 or 6543. " +
+                        "Verify the host and username in Supabase Connect > Connection String > URI, " +
+                        "confirm the Supabase project is not paused (Dashboard > Settings > Paused), " +
+                        "then check Vercel Environment Variables for DATABASE_URL, DATABASE_USER, DATABASE_PASSWORD. " +
+                        "The password was not validated because the network or SSL handshake did not complete.",
                         firstFailure.getSQLState(), firstFailure.getErrorCode(), firstFailure);
             }
+        }
+    }
+
+    /**
+     * Logs a categorized connection failure. Never prints passwords, admin keys, or session secrets.
+     * Categories: DNS, TCP, SSL, Authentication, Connection limit, Schema, Other.
+     */
+    private static void logConnectionFailure(String jdbcUrl, SQLException e) {
+        String safeHost = extractSafeHost(jdbcUrl);
+        System.err.println("[DB] Connection failed to " + safeHost);
+        // Walk the cause chain to find the network-level failure first.
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof UnknownHostException uhe) {
+                System.err.println("[DB] DIAGNOSIS: DNS resolution failed — the database hostname could not be resolved.");
+                System.err.println("[DB] Check that DATABASE_URL contains the exact Supabase pooler hostname (e.g. aws-0-ap-southeast-1.pooler.supabase.com).");
+                System.err.println("[DB] DNS failure detail: " + uhe.getMessage());
+                return;
+            }
+            if (t instanceof ConnectException ce) {
+                System.err.println("[DB] DIAGNOSIS: TCP connection refused or timed out — the host is reachable but the port is blocked or closed.");
+                System.err.println("[DB] Verify the port in DATABASE_URL. Transaction pooler = 6543; Session pooler = 5432.");
+                System.err.println("[DB] TCP detail: " + ce.getMessage());
+                return;
+            }
+            if (t instanceof SocketTimeoutException ste) {
+                System.err.println("[DB] DIAGNOSIS: TCP socket timeout — no response within the connect/socket timeout.");
+                System.err.println("[DB] The Supabase project may be paused. Check Dashboard > Settings > Paused Projects.");
+                System.err.println("[DB] Timeout detail: " + ste.getMessage());
+                return;
+            }
+            if (t instanceof NoRouteToHostException nrhe) {
+                System.err.println("[DB] DIAGNOSIS: No route to host — network path to Supabase is blocked.");
+                System.err.println("[DB] Detail: " + nrhe.getMessage());
+                return;
+            }
+        }
+        // No network exception in chain; inspect the SQLState for the cause category.
+        String state = e.getSQLState();
+        String msg = e.getMessage() == null ? "(no message)" : e.getMessage();
+        if ("28P01".equals(state) || "28000".equals(state)) {
+            System.err.println("[DB] DIAGNOSIS: Authentication failed — DATABASE_USER or DATABASE_PASSWORD is wrong.");
+            System.err.println("[DB] Use the Supabase pooler username (e.g. postgres.abcdefgh) from Dashboard > Connect > URI.");
+            System.err.println("[DB] SQLState: " + state);
+        } else if ("3D000".equals(state)) {
+            System.err.println("[DB] DIAGNOSIS: Database does not exist — check the database name in DATABASE_URL (usually 'postgres').");
+        } else if ("53300".equals(state)) {
+            System.err.println("[DB] DIAGNOSIS: Too many connections — Supabase pooler connection limit reached. Wait and retry.");
+        } else if ("53200".equals(state)) {
+            System.err.println("[DB] DIAGNOSIS: Out of memory on the database server.");
+        } else if (state != null && state.startsWith("08")) {
+            System.err.println("[DB] DIAGNOSIS: Network/connection protocol error (SQLState " + state + ").");
+            System.err.println("[DB] This may indicate an SSL negotiation failure. Ensure sslmode=require is in DATABASE_URL.");
+            System.err.println("[DB] Detail: " + msg);
+        } else if (state != null && state.startsWith("42")) {
+            System.err.println("[DB] DIAGNOSIS: SQL schema or object error (SQLState " + state + "): " + msg);
+            System.err.println("[DB] The database schema may be incomplete. Re-run the application to re-initialize.");
+        } else if (state != null && (state.startsWith("57") || state.startsWith("58"))) {
+            System.err.println("[DB] DIAGNOSIS: Database initialization or system error (SQLState " + state + "): " + msg);
+        } else {
+            System.err.println("[DB] DIAGNOSIS: Unclassified database error (SQLState=" + state + "): " + msg);
+        }
+    }
+
+    /** Extracts the host:port from a JDBC URL without exposing credentials. */
+    private static String extractSafeHost(String jdbcUrl) {
+        try {
+            int start = "jdbc:postgresql://".length();
+            int slash = jdbcUrl.indexOf('/', start);
+            String authority = slash > 0 ? jdbcUrl.substring(start, slash) : jdbcUrl.substring(start);
+            int at = authority.lastIndexOf('@');
+            return at >= 0 ? authority.substring(at + 1) : authority;
+        } catch (Exception ignored) {
+            return "(unknown host)";
         }
     }
 
@@ -122,6 +210,7 @@ public final class PostgresRecordStorage implements RecordStorage {
     @Override public boolean isRemoteDatabase() { return true; }
 
     @Override public void initialize(int initialSlotCount) throws Exception {
+        System.out.println("[DB] Initializing database schema...");
         try (Connection c = connection(); Statement s = c.createStatement()) {
             s.execute("CREATE TABLE IF NOT EXISTS udp_slots (slot_number INTEGER PRIMARY KEY CHECK (slot_number > 0), compatibility VARCHAR(16) NOT NULL DEFAULT 'ANY' CHECK (compatibility IN ('ANY','CAR','MOTORCYCLE')), enabled BOOLEAN NOT NULL DEFAULT TRUE)");
             s.execute("CREATE TABLE IF NOT EXISTS udp_slot_counter (id INTEGER PRIMARY KEY CHECK (id=1), next_slot INTEGER NOT NULL CHECK (next_slot > 0), initialized BOOLEAN NOT NULL DEFAULT FALSE)");
@@ -133,17 +222,16 @@ public final class PostgresRecordStorage implements RecordStorage {
             s.execute("CREATE UNIQUE INDEX IF NOT EXISTS udp_one_active_session_per_slot ON udp_sessions(slot_number) WHERE exit_time IS NULL");
             s.execute("CREATE INDEX IF NOT EXISTS udp_sessions_history_idx ON udp_sessions(entry_time DESC)");
             s.execute("CREATE TABLE IF NOT EXISTS udp_entry_intents (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES udp_users(id) ON DELETE CASCADE, slot_number INTEGER NOT NULL REFERENCES udp_slots(slot_number), plate VARCHAR(15) NOT NULL, vehicle_type VARCHAR(16) NOT NULL CHECK (vehicle_type IN ('CAR','MOTORCYCLE')), duration_minutes INTEGER NOT NULL, expires_at TIMESTAMPTZ NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'PREPARED', entered_at TIMESTAMPTZ NULL)");
-            // [MIGRATION] Upgrades existing v1.6 table to retain one row per actual entry, preserving its old data.
             s.execute("ALTER TABLE udp_entry_intents ADD COLUMN IF NOT EXISTS id BIGSERIAL");
             s.execute("ALTER TABLE udp_entry_intents ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'PREPARED'");
             s.execute("ALTER TABLE udp_entry_intents ADD COLUMN IF NOT EXISTS entered_at TIMESTAMPTZ NULL");
-            // Only change the primary key when migrating the old v1.6 schema, which used user_id as its key.
             s.execute("DO $$ DECLARE pk_cols TEXT; BEGIN SELECT string_agg(a.attname, ',' ORDER BY k.ord) INTO pk_cols FROM pg_constraint c JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum WHERE c.conrelid='udp_entry_intents'::regclass AND c.contype='p'; IF pk_cols IS DISTINCT FROM 'id' THEN ALTER TABLE udp_entry_intents DROP CONSTRAINT IF EXISTS udp_entry_intents_pkey; ALTER TABLE udp_entry_intents ADD CONSTRAINT udp_entry_intents_pkey PRIMARY KEY (id); END IF; END $$");
             s.execute("CREATE UNIQUE INDEX IF NOT EXISTS udp_entry_intents_one_prepared_per_user ON udp_entry_intents(user_id) WHERE status='PREPARED'");
             s.execute("CREATE TABLE IF NOT EXISTS udp_feedback (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES udp_users(id) ON DELETE CASCADE, category VARCHAR(32) NOT NULL CHECK (category IN ('Suggestion','Bug report','User experience','Other')), rating SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5), message VARCHAR(1000) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'NEW' CHECK (status IN ('NEW','REVIEWING','RESOLVED','DISMISSED')), admin_note VARCHAR(1000) NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())");
             s.execute("CREATE INDEX IF NOT EXISTS udp_feedback_created_idx ON udp_feedback(created_at DESC)");
             s.execute("CREATE INDEX IF NOT EXISTS udp_feedback_status_idx ON udp_feedback(status, created_at DESC)");
         }
+        System.out.println("[DB] Schema DDL complete. Initializing slot counter...");
         try (Connection c = connection()) {
             c.setAutoCommit(false);
             try {
@@ -173,6 +261,7 @@ public final class PostgresRecordStorage implements RecordStorage {
                     }
                 }
                 c.commit();
+                System.out.println("[DB] Database initialization complete.");
             } catch (Exception e) { c.rollback(); throw e; }
         }
     }
@@ -246,12 +335,33 @@ public final class PostgresRecordStorage implements RecordStorage {
         }
     }
 
-    @Override public UserData createUser(String email,String name,String salt,String hash) throws Exception {
-        try(Connection c=connection();PreparedStatement p=c.prepareStatement("INSERT INTO udp_users(email,display_name,salt,password_hash,role) VALUES(?,?,?,?, 'USER') RETURNING id,email,display_name,salt,password_hash,role")) {
-            p.setString(1,email);p.setString(2,name);p.setString(3,salt);p.setString(4,hash);
-            try(ResultSet r=p.executeQuery()){r.next();return user(r);}
-        } catch(SQLException e){ if("23505".equals(e.getSQLState()))throw new IllegalArgumentException("An account with that email already exists."); throw e; }
+    @Override public UserData createUser(String email, String name, String salt, String hash) throws Exception {
+        try (Connection c = connection()) {
+            c.setAutoCommit(false);
+            try {
+                UserData user;
+                try (PreparedStatement p = c.prepareStatement(
+                        "INSERT INTO udp_users(email,display_name,salt,password_hash,role) " +
+                        "VALUES(?,?,?,?,'USER') RETURNING id,email,display_name,salt,password_hash,role")) {
+                    p.setString(1, email); p.setString(2, name); p.setString(3, salt); p.setString(4, hash);
+                    try (ResultSet r = p.executeQuery()) {
+                        if (!r.next()) throw new SQLException("User INSERT did not return a row.");
+                        user = user(r);
+                    }
+                }
+                c.commit();
+                return user;
+            } catch (SQLException e) {
+                c.rollback();
+                if ("23505".equals(e.getSQLState())) throw new IllegalArgumentException("An account with that email already exists.");
+                throw e;
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            }
+        }
     }
+
     @Override public UserData findUserByEmail(String email) throws Exception {
         try(Connection c=connection();PreparedStatement p=c.prepareStatement("SELECT id,email,display_name,salt,password_hash,role FROM udp_users WHERE lower(email)=lower(?)")){p.setString(1,email);try(ResultSet r=p.executeQuery()){return r.next()?user(r):null;}}
     }
@@ -331,7 +441,6 @@ public final class PostgresRecordStorage implements RecordStorage {
             }
             if(!accepts(s,type))throw new IllegalStateException("This slot is not suitable for your vehicle type.");
             SessionData result;try(PreparedStatement p=c.prepareStatement("INSERT INTO udp_sessions(slot_number,user_id,plate,vehicle_type,entry_time,reservation_id) VALUES(?,?,?,?,?,?) RETURNING id,slot_number,user_id,plate,vehicle_type,entry_time,exit_time,reservation_id")){p.setInt(1,slot);p.setLong(2,userId);p.setString(3,plate);p.setString(4,type);p.setTimestamp(5,Timestamp.from(now));if(reservationId==null)p.setNull(6,Types.BIGINT);else p.setLong(6,reservationId);try(ResultSet r=p.executeQuery()){r.next();result=session(r);}}
-            // Retain one audit row for every entry; update its prepared intent when present, or insert for reservations.
             int marked;try(PreparedStatement p=c.prepareStatement("UPDATE udp_entry_intents SET plate=?,vehicle_type=?,duration_minutes=?,expires_at=?,status='ENTERED',entered_at=? WHERE user_id=? AND slot_number=? AND status='PREPARED' AND expires_at>?")){p.setString(1,plate);p.setString(2,type);p.setInt(3,duration);p.setTimestamp(4,Timestamp.from(now.minusMillis(1)));p.setTimestamp(5,Timestamp.from(now));p.setLong(6,userId);p.setInt(7,slot);p.setTimestamp(8,Timestamp.from(now));marked=p.executeUpdate();}
             if(marked==0)try(PreparedStatement p=c.prepareStatement("INSERT INTO udp_entry_intents(user_id,slot_number,plate,vehicle_type,duration_minutes,expires_at,status,entered_at) VALUES(?,?,?,?,?,?, 'ENTERED', ?)")){p.setLong(1,userId);p.setInt(2,slot);p.setString(3,plate);p.setString(4,type);p.setInt(5,duration);p.setTimestamp(6,Timestamp.from(now.minusMillis(1)));p.setTimestamp(7,Timestamp.from(now));p.executeUpdate();}
             c.commit();return result;
@@ -366,12 +475,17 @@ public final class PostgresRecordStorage implements RecordStorage {
         if (rating < 1 || rating > 5) throw new IllegalArgumentException("Choose a rating from 1 to 5.");
         if (text.length() < 5 || text.length() > 1000) throw new IllegalArgumentException("Feedback must be between 5 and 1000 characters.");
         try (Connection connection = connection()) {
-            long newId;
-            try (PreparedStatement p = connection.prepareStatement("INSERT INTO udp_feedback(user_id,category,rating,message,status,admin_note,created_at,updated_at) VALUES(?,?,?,?, 'NEW','',?,?) RETURNING id")) {
-                p.setLong(1, userId); p.setString(2, c); p.setInt(3, rating); p.setString(4, text); p.setTimestamp(5, Timestamp.from(now)); p.setTimestamp(6, Timestamp.from(now));
-                try (ResultSet r = p.executeQuery()) { if (!r.next()) throw new SQLException("Feedback insert did not return an id."); newId = r.getLong(1); }
-            }
-            return getFeedback(connection, newId);
+            connection.setAutoCommit(false);
+            try {
+                long newId;
+                try (PreparedStatement p = connection.prepareStatement("INSERT INTO udp_feedback(user_id,category,rating,message,status,admin_note,created_at,updated_at) VALUES(?,?,?,?, 'NEW','',?,?) RETURNING id")) {
+                    p.setLong(1, userId); p.setString(2, c); p.setInt(3, rating); p.setString(4, text); p.setTimestamp(5, Timestamp.from(now)); p.setTimestamp(6, Timestamp.from(now));
+                    try (ResultSet r = p.executeQuery()) { if (!r.next()) throw new SQLException("Feedback insert did not return an id."); newId = r.getLong(1); }
+                }
+                FeedbackData result = getFeedback(connection, newId);
+                connection.commit();
+                return result;
+            } catch (Exception e) { connection.rollback(); throw e; }
         }
     }
 
@@ -390,11 +504,16 @@ public final class PostgresRecordStorage implements RecordStorage {
         String note = adminNote == null ? "" : adminNote.replaceAll("[\\r\\n\\t]+", " ").trim();
         if (note.length() > 1000) throw new IllegalArgumentException("Admin note must be 1000 characters or fewer.");
         try (Connection c = connection()) {
-            try (PreparedStatement p = c.prepareStatement("UPDATE udp_feedback SET status=?,admin_note=?,updated_at=? WHERE id=?")) {
-                p.setString(1, next); p.setString(2, note); p.setTimestamp(3, Timestamp.from(now)); p.setLong(4, feedbackId);
-                if (p.executeUpdate() != 1) throw new IllegalArgumentException("Feedback item not found.");
-            }
-            return getFeedback(c, feedbackId);
+            c.setAutoCommit(false);
+            try {
+                try (PreparedStatement p = c.prepareStatement("UPDATE udp_feedback SET status=?,admin_note=?,updated_at=? WHERE id=?")) {
+                    p.setString(1, next); p.setString(2, note); p.setTimestamp(3, Timestamp.from(now)); p.setLong(4, feedbackId);
+                    if (p.executeUpdate() != 1) throw new IllegalArgumentException("Feedback item not found.");
+                }
+                FeedbackData result = getFeedback(c, feedbackId);
+                c.commit();
+                return result;
+            } catch (Exception e) { c.rollback(); throw e; }
         }
     }
 

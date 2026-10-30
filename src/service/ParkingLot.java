@@ -30,11 +30,31 @@ public final class ParkingLot {
     public RecordStorage getStorage() { return storage; }
 
     private volatile boolean initialized = false;
+    // Prevents hammering the database with rapid retry attempts when it is unavailable.
+    private volatile long lastInitAttemptMs = 0;
+    private static final long DB_RETRY_COOLDOWN_MS = 20_000;
 
     public void initialize() throws Exception { storage.initialize(SLOT_COUNT); storage.expireReservations(Instant.now()); initialized = true; }
     public boolean isInitialized() { return initialized; }
-    /** Retries initialization if the first attempt failed at startup. Thread-safe. */
-    public synchronized void ensureInitialized() throws Exception { if (!initialized) initialize(); }
+    /**
+     * Retries database initialization if the first attempt failed at startup.
+     * Thread-safe. Enforces a 20-second cooldown between attempts so a temporarily
+     * unreachable database does not receive a new connection attempt on every request.
+     */
+    public synchronized void ensureInitialized() throws Exception {
+        if (initialized) return;
+        long now = System.currentTimeMillis();
+        long elapsed = now - lastInitAttemptMs;
+        if (lastInitAttemptMs > 0 && elapsed < DB_RETRY_COOLDOWN_MS) {
+            long waitSec = (DB_RETRY_COOLDOWN_MS - elapsed) / 1000 + 1;
+            throw new IllegalStateException(
+                "The database connection is not yet ready. Please try again in " + waitSec + " seconds.");
+        }
+        lastInitAttemptMs = now;
+        System.out.println("[DB] Retrying database initialization...");
+        initialize();
+        System.out.println("[DB] Database initialized on retry. Service is now fully ready.");
+    }
 
     public List<Map<String,Object>> slotViews() throws Exception {
         Instant now=Instant.now(); storage.expireReservations(now);
