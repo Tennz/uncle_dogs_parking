@@ -67,12 +67,12 @@ RESERVATION EXPIRY
 ============================================================
 5. VERCEL DEPLOYMENT (PUBLIC HTTPS WEBSITE)
 ============================================================
-This version includes Dockerfile.vercel for Vercel's container-based Functions. It runs the same Java 17 HttpServer, uses the PORT supplied by the platform (defaulting to 80), and stores all durable information in the EXISTING Supabase PostgreSQL project. Do not create another Supabase project.
+This version includes a Vercel container image as the root Dockerfile. It runs the same Java 17 HttpServer, uses the PORT supplied by the platform (defaulting to 80), and stores all durable information in the EXISTING Supabase PostgreSQL project. Do not create another Supabase project. Dockerfile.generic is a separate image for other container hosts and is not used by Vercel.
 
 Before deploying:
-- Use the current v1.8.3 project files. The repository root must directly contain Dockerfile.vercel, src/, and assets/ (do not upload an extra parent folder containing the project).
+- Use the current v1.8.3 project files. The repository root must directly contain Dockerfile, src/, and assets/ (do not upload an extra parent folder containing the project). Vercel only builds a root file named exactly Dockerfile.
 - Keep the GitHub repository private for a school project. The .gitignore excludes config.txt, data CSVs/keys, local build output, and local environment files. Check GitHub Desktop's Changes list before committing: config.txt and data/*.csv/data/*.key must not be listed. If config.txt was already tracked in an older repository, remove it from tracking before pushing.
-- Do not copy the local config.txt into the Vercel image. Dockerfile.vercel intentionally does not copy it.
+- Do not copy the local config.txt into the Vercel image. The root Dockerfile intentionally does not copy it.
 
 Deploy:
 1. Push the project files to a private GitHub repository. Then open https://vercel.com/new and import that repository.
@@ -84,7 +84,7 @@ Deploy:
    SHOW_SWING         = false
    OPEN_BROWSER       = false
 3. Enable / expose Vercel System Environment Variables so the app can use VERCEL_PROJECT_PRODUCTION_URL for production QR links and VERCEL_URL for preview links. If those variables are unavailable, the app derives the current HTTPS hostname from the incoming request. After the first deployment, it is still recommended to set BASE_URL to the final public HTTPS production domain and redeploy before printing production QR labels.
-4. Deploy. Vercel detects Dockerfile.vercel and builds the Java 17 container. Check the deployment logs; startup must identify Supabase/PostgreSQL storage. If DATABASE_URL or ADMIN_KEY are missing, this version deliberately stops with a clear configuration error instead of silently using temporary CSV data.
+4. Deploy. Vercel builds the root Dockerfile as the Java 17 container. Check the deployment logs; startup must identify Supabase/PostgreSQL storage. If DATABASE_URL or ADMIN_KEY are missing, this version deliberately stops with a clear configuration error instead of silently using temporary CSV data.
 5. Open the exact public https://...vercel.app address from your phone using mobile data. Register or sign in, create a test reservation, verify it appears in your existing Supabase Table Editor, and test ENTER and LEAVE before printing labels.
 6. Reprint website, ENTER, and LEAVE QRs from the final production domain. Do not use localhost or a private 192.168.x.x address for remote access. QR labels generated from a preview deployment should not be used for production.
 
@@ -133,8 +133,8 @@ LOCAL NETWORK TROUBLESHOOTING
 ============================================================
 8. MAIN STRUCTURE
 ============================================================
-Dockerfile.vercel (Vercel HTTP container)
-Dockerfile (generic Java container)
+Dockerfile (Vercel HTTP container)
+Dockerfile.generic (generic Java container for other hosts)
 src/Main.java
 src/model/Vehicle.java, Car.java, Motorcycle.java, ParkingSlot.java, ParkingRecord.java, Reservation.java
 src/service/ParkingLot.java, AppConfig.java, PasswordUtil.java
@@ -144,7 +144,7 @@ src/gui/AdminWindow.java
 assets/logo.jpg (included, resized to 600x600)
 config.txt
 run.bat / run.sh
-Dockerfile / Dockerfile.vercel
+Dockerfile / Dockerfile.generic
 
 automated tests: tests/smoke-test.sh
 Version 1.8.0 adds a database-backed feedback inbox, smooth loading and skeleton states, accessible responsive motion, and an asynchronous desktop feedback dashboard, while preserving the prior QR/reservation behavior. The 1.6.x series fixed login verification, QR routing/timing, status priority, and safe slot deletion.

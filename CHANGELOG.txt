@@ -1,5 +1,10 @@
 UNCLE DOGS PARKING · CHANGELOG
 
+Deployment fix
+- Promoted the Vercel container image to the repository root Dockerfile so Vercel builds it automatically; the previous Dockerfile.vercel name is never detected by Vercel.
+- Renamed the generic container image to Dockerfile.generic and aligned it to the app's default port 8080 with headless mode enabled.
+- Updated deployment docs and structure listings to reference the root Dockerfile.
+
 Version 1.8.3
 - Added guarded Supabase pooler fallback: if a shared session-pooler connection fails due to connectivity/SSL errors, try the shared transaction pooler at port 6543 with JDBC server-side prepared statements disabled.
 - Added check-supabase.bat / check-supabase.ps1 to diagnose DNS and TCP reachability without reading or displaying passwords.

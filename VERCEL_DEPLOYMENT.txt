@@ -5,13 +5,13 @@ This package is prepared for Vercel's Dockerfile-based HTTP container deployment
 A. PREPARE GITHUB
 1. Extract this ZIP.
 2. Create a PRIVATE repository at https://github.com/new.
-3. Upload the contents of the UncleDogsParking project so Dockerfile.vercel, src/, and assets/ are at the repository root.
+3. Upload the contents of the UncleDogsParking project so Dockerfile, src/, and assets/ are at the repository root. The root Dockerfile is the Vercel container image; Dockerfile.generic is only for other hosts.
 4. .gitignore excludes config.txt, local CSV/key files, and build output. Before committing, verify config.txt and data/*.csv/data/*.key are not staged. Never upload the database password or admin key. If config.txt was committed in an older repository, remove it from Git tracking first.
 
 B. CREATE THE VERCEL PROJECT
 1. Open https://vercel.com/new and import the private repository.
 2. Keep the Root Directory at the repository root.
-3. Vercel detects Dockerfile.vercel automatically. The container listens on the platform PORT (defaults to 80).
+3. Vercel builds the Dockerfile at the repository root automatically. The container listens on the platform PORT (defaults to 80). Do not rename this file; Vercel only uses a root Dockerfile named exactly Dockerfile.
 
 C. SET ENVIRONMENT VARIABLES
 In Project Settings → Environment Variables, set these in Production:
