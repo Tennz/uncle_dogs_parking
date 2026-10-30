@@ -52,6 +52,9 @@ public final class Main {
                     storage = new FileRecordStorage(Path.of(config.get("DATA_DIR","data")));
                     initializedLot = new ParkingLot(storage);
                     initializedLot.initialize();
+                } else if(storage.isRemoteDatabase() && vercelDeployment) {
+                    System.err.println("WARNING: Database not reachable at startup: "+storageError.getMessage());
+                    System.err.println("The HTTP server will start in degraded mode. API routes requiring the database will return HTTP 503 until the connection is restored.");
                 } else if(storage.isRemoteDatabase()) {
                     throw new IllegalStateException(
                         "Could not connect to Supabase, so the app did not start. For Supabase shared-pooler URLs, the connection layer attempts Session Pooler port 5432 and tries Transaction Pooler port 6543 only after a network/SSL connection failure. Run check-supabase.bat and use the exact host from Supabase Connect. No CSV fallback was used, to avoid splitting shared reservations. For a temporary LAN-only UI test, set ALLOW_LOCAL_CSV_FALLBACK=true in config.txt; this mode does not sync with Supabase.", storageError);

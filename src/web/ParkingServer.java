@@ -56,6 +56,7 @@ public final class ParkingServer {
         try {
             String path=ex.getRequestURI().getPath();String method=ex.getRequestMethod().toUpperCase();
             if(path.equals("/healthz")||path.equals("/api/health")){json(ex,200,map("status","ok","time",Instant.now().toString()));return;}
+            if(path.equals("/readyz")){handleReadyz(ex);return;}
             if(path.equals("/assets/logo.jpg")){serveLogo(ex);return;}
             if(path.startsWith("/enter/")||path.startsWith("/leave/")){
                 if(method.equals("GET")){handleQrAction(ex,path);return;}
@@ -63,15 +64,16 @@ public final class ParkingServer {
                 ex.getResponseHeaders().set("Allow","GET, POST");
                 qrPage(ex,405,"Unsupported QR request","Open the QR link in your browser and follow the on-screen instructions.","Open parking website","/",false);return;
             }
-            if(path.equals("/")&&method.equals("GET")){lot.processExpirations();html(ex,200,PageBuilder.build(requestBaseUrl(ex)));return;}
+            if(path.equals("/")&&method.equals("GET")){if(lot.isInitialized()){try{lot.processExpirations();}catch(Exception ignored){}}html(ex,200,PageBuilder.build(requestBaseUrl(ex)));return;}
             if(!path.startsWith("/api/")){json(ex,404,map("message","Page not found."));return;}
             if(path.startsWith("/api/")&&isPrefetch(ex)&&path.equals("/api/scan")){json(ex,200,map("ignored",true,"message","Preview requests do not perform parking actions. Open the site and use Scan QR."));return;}
-            try { lot.processExpirations(); } catch (Exception dbError) { throw dbError; }
+            if(!lot.isInitialized()){try{lot.ensureInitialized();}catch(Exception dbError){safeJson(ex,503,map("message","The database is not yet available. Please try again in a moment.","retryable",true));return;}}
+            try{lot.processExpirations();}catch(Exception ignored){}
             routeApi(ex,path,method);
         } catch (IllegalArgumentException e) {safeJson(ex,400,map("message",friendly(e)));}
           catch (SecurityException e) {safeJson(ex,401,map("message",friendly(e)));}
           catch (IllegalStateException e) {safeJson(ex,409,map("message",friendly(e)));}
-          catch (Exception e) {System.err.println("Request failed: "+ex.getRequestMethod()+" "+ex.getRequestURI().getPath()+" :: "+e.getClass().getSimpleName()+": "+e.getMessage());safeJson(ex,500,map("message","The server could not complete that request. Please try again; your action was not confirmed."));}
+          catch (Exception e) {if(isDatabaseError(e)){safeJson(ex,503,map("message","The database is temporarily unavailable. Please try again in a moment."));}else{System.err.println("Request failed: "+ex.getRequestMethod()+" "+ex.getRequestURI().getPath()+" :: "+e.getClass().getSimpleName()+": "+e.getMessage());safeJson(ex,500,map("message","The server could not complete that request. Please try again; your action was not confirmed."));}}
         finally {ex.close();}
     }
 
@@ -327,6 +329,21 @@ public final class ParkingServer {
     }
     private static String htmlEscape(String s){return String.valueOf(s==null?"":s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\"","&quot;").replace("'","&#39;");}
     private static void neutralLegacyPage(HttpExchange ex)throws IOException{html(ex,200,"<!doctype html><html><meta name='viewport' content='width=device-width, initial-scale=1'><title>Uncle Dogs Parking</title><body style='font:16px system-ui;max-width:540px;margin:48px auto;padding:18px'><h1>Uncle Dogs Parking</h1><p>Use the latest QR labels from Version 1.8.3. The new ENTER and LEAVE codes open this website directly.</p><p><a href='/'>Open the parking website</a></p></body></html>");}
+    private void handleReadyz(HttpExchange ex) throws IOException {
+        if(!lot.isInitialized()){try{lot.ensureInitialized();}catch(Exception e){json(ex,503,map("status","unavailable","db","unreachable"));return;}}
+        try{lot.processExpirations();json(ex,200,map("status","ready","db",lot.getStorage().isRemoteDatabase()?"postgresql":"csv","time",Instant.now().toString()));}
+        catch(Exception e){json(ex,503,map("status","degraded","db","unreachable"));}
+    }
+    private static boolean isDatabaseError(Exception e) {
+        for(Throwable t=e;t!=null;t=t.getCause()){
+            if(t instanceof java.sql.SQLException)return true;
+            if(t instanceof java.net.SocketTimeoutException)return true;
+            if(t instanceof java.net.ConnectException)return true;
+            if(t instanceof java.net.UnknownHostException)return true;
+        }
+        return false;
+    }
+
     private static boolean isPrefetch(HttpExchange ex){String[] headers={"Purpose","Sec-Purpose","X-Moz"};for(String h:headers){String v=ex.getRequestHeaders().getFirst(h);if(v!=null&&(v.toLowerCase().contains("prefetch")||v.toLowerCase().contains("preview")||v.toLowerCase().contains("prerender")))return true;}
         String ua=ex.getRequestHeaders().getFirst("User-Agent");if(ua==null)return false;String v=ua.toLowerCase();return v.contains("bot")||v.contains("crawler")||v.contains("spider")||v.contains("preview")||v.contains("facebookexternalhit")||v.contains("slackbot")||v.contains("whatsapp")||v.contains("discordbot");}
 

@@ -29,7 +29,12 @@ public final class ParkingLot {
     public ParkingLot(RecordStorage storage) { this.storage = storage; }
     public RecordStorage getStorage() { return storage; }
 
-    public void initialize() throws Exception { storage.initialize(SLOT_COUNT); storage.expireReservations(Instant.now()); }
+    private volatile boolean initialized = false;
+
+    public void initialize() throws Exception { storage.initialize(SLOT_COUNT); storage.expireReservations(Instant.now()); initialized = true; }
+    public boolean isInitialized() { return initialized; }
+    /** Retries initialization if the first attempt failed at startup. Thread-safe. */
+    public synchronized void ensureInitialized() throws Exception { if (!initialized) initialize(); }
 
     public List<Map<String,Object>> slotViews() throws Exception {
         Instant now=Instant.now(); storage.expireReservations(now);
@@ -81,7 +86,7 @@ public final class ParkingLot {
     public void adminCancelReservation(long reservationId) throws Exception {
         if(!storage.adminCancelReservation(reservationId,Instant.now()))throw new IllegalStateException("This reservation cannot be cancelled. It may already be active, completed, or expired.");
     }
-    public void processExpirations() throws Exception { storage.expireReservations(Instant.now()); }
+    public void processExpirations() throws Exception { if (!initialized) return; storage.expireReservations(Instant.now()); }
 
     public void prepareWalkIn(long userId,int slot,String plateRaw,String plateConfirm,String vehicleType,int duration) throws Exception {
         Vehicle vehicle=vehicle(vehicleType,plateRaw);

@@ -40,3 +40,8 @@ desktop.ini
 
 # Local Vercel CLI metadata
 .vercel/
+
+# Claude Code rollback metadata (local only, never publish)
+.claude_rollback_pointer.json
+sources_build.txt
+out_new/
