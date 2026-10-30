@@ -1,0 +1,30 @@
+UNCLE DOGS PARKING v1.8.3 - LOCAL PHONE ACCESS
+
+1. Start the app with run.bat and wait until the console says "Uncle Dogs Parking is running".
+   If the app exits with a Supabase connection error, it is not serving the site yet. v1.8.3 attempts the Supabase shared transaction pooler on port 6543 if the configured session pooler fails. Run check-supabase.bat. For a temporary LAN-only UI test, you can set ALLOW_LOCAL_CSV_FALLBACK=true in config.txt; it does not sync with Supabase and shows a warning. Keep it false for actual shared data.
+2. Connect the phone and host PC to the same non-guest Wi-Fi network.
+3. On the PC, open the Local URL shown in the console. On the phone, open the exact Network URL
+   shown in that same console, for example http://192.168.0.106:8080/ . Do not use localhost
+   from the phone; localhost always refers to the phone itself.
+4. If the PC works but the phone cannot open it, double-click allow-lan.bat once and approve the
+   Windows administrator prompt. The rule allows the app's TCP port from the local subnet only.
+5. On the phone, test the health endpoint using the same IP and port plus /healthz. It should
+   show {"status":"ok"}. If it still fails, confirm you are not on Guest Wi-Fi and that the access
+   point does not have client/AP isolation enabled. Some campus networks intentionally block
+   devices from contacting one another.
+6. If multiple Network URLs are printed, try the one on the same subnet as your phone. If needed,
+   run ipconfig on Windows and use the IPv4 address of the connected Wi-Fi adapter.
+7. Local IP / HTTP access is for same-Wi-Fi testing. Phone camera scanning requires HTTPS or
+   localhost in supported browsers. Use the public Vercel HTTPS URL for the in-site camera from phones.
+
+RESERVATION EXPIRY
+- The app cancels unused RESERVED bookings at or after reserved_at + 90 minutes on each relevant
+  request. In local/non-Vercel mode, a background maintenance task also checks every 30 seconds.
+- For hosted Vercel deployments, containers can scale down between requests, so a Java background
+  thread cannot guarantee scheduled cleanup. Run database/setup_reservation_expiry.sql once in your
+  EXISTING Supabase project after the app has created the tables. Enable Supabase Cron first if
+  required. It runs the database expiration job every minute, even when Vercel is idle; regular app
+  requests also expire due reservations immediately.
+- The reservation status is changed to EXPIRED (not deleted) to preserve the audit record. Since
+  only RESERVED entries block a slot, the slot becomes Available once no active parking session or
+  other valid reservation occupies it.

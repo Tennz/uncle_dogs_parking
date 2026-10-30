@@ -1,0 +1,42 @@
+# Build output
+out/
+*.class
+sources.txt
+
+# Dependencies downloaded by run scripts / Docker
+lib/*.jar
+*.jar
+
+# Local runtime data (contains user/PII)
+data/*.csv
+data/*.key
+data/slot_counter.txt
+
+# Secrets / local config
+config.txt
+config.txt.local
+.env
+.env.*
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+.settings/
+.project
+.classpath
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+*.orig
+~$*
+
+# Local Vercel CLI metadata
+.vercel/

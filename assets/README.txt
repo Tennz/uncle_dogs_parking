@@ -1,0 +1,1 @@
+The resized black-and-white Uncle Dogs Parking logo is included as assets/logo.jpg. The website, Swing admin window, and printable QR labels use this image. Keep this filename and path if replacing the logo.

@@ -1,0 +1,53 @@
+UNCLE DOGS PARKING v1.8.3 — VERCEL DEPLOYMENT GUIDE
+
+This package is prepared for Vercel's Dockerfile-based HTTP container deployment. The Java server, website, QR endpoints, and Swing source remain part of the same project. Vercel runs only the web service; the Swing window is disabled online. All shared data stays in your existing Supabase PostgreSQL project.
+
+A. PREPARE GITHUB
+1. Extract this ZIP.
+2. Create a PRIVATE repository at https://github.com/new.
+3. Upload the contents of the UncleDogsParking project so Dockerfile.vercel, src/, and assets/ are at the repository root.
+4. .gitignore excludes config.txt, local CSV/key files, and build output. Before committing, verify config.txt and data/*.csv/data/*.key are not staged. Never upload the database password or admin key. If config.txt was committed in an older repository, remove it from Git tracking first.
+
+B. CREATE THE VERCEL PROJECT
+1. Open https://vercel.com/new and import the private repository.
+2. Keep the Root Directory at the repository root.
+3. Vercel detects Dockerfile.vercel automatically. The container listens on the platform PORT (defaults to 80).
+
+C. SET ENVIRONMENT VARIABLES
+In Project Settings → Environment Variables, set these in Production:
+
+DATABASE_URL       jdbc:postgresql://YOUR_EXISTING_SUPABASE_POOLER_HOST:5432/postgres?sslmode=require
+DATABASE_USER      YOUR_EXISTING_SUPABASE_DATABASE_USERNAME
+DATABASE_PASSWORD  YOUR_EXISTING_SUPABASE_DATABASE_PASSWORD
+ADMIN_KEY          YOUR_EXISTING_PRIVATE_ADMIN_KEY
+SHOW_SWING         false
+OPEN_BROWSER       false
+
+Use the actual host, username, and password from your EXISTING Supabase project. Do not create another database. Do not put secrets in source code or commit them to GitHub. Enter the same admin key configured in your private local config.txt into this Vercel variable, or rotate it and use the new value consistently. Never put the actual key in this guide or in GitHub.
+
+Enable Vercel System Environment Variables if the option is shown. The app uses the production Vercel hostname for QR generation when available; it also derives the public host from the incoming request if those system variables are not available. After deployment, set BASE_URL to the final production HTTPS URL if you want to pin the QR domain. Leave BASE_URL unset during the first deployment if you do not yet know the assigned URL.
+
+D. DEPLOY AND TEST
+1. Deploy. In deployment logs, confirm the startup says Storage: Supabase/PostgreSQL. If DATABASE_URL or ADMIN_KEY is missing, startup deliberately fails instead of using temporary local CSV files.
+2. Open the public HTTPS URL shown by Vercel.
+3. Test account registration and login, then verify the account in Supabase → Table Editor → public.udp_users.
+4. Make a test reservation and verify it in public.udp_reservations.
+5. Test ENTER QR, plate confirmation, LEAVE QR, and verify active state/history in Supabase.
+6. Test a normal user submitting feedback, then unlock Admin and confirm the feedback inbox works.
+7. Open the production website from a phone using mobile data with Wi-Fi turned off. The public HTTPS URL must load. The in-site camera requires browser camera permission.
+8. Print the website and slot QR labels only after the final production URL is stable. Reprint labels if the domain changes.
+9. For automatic no-show expiration while Vercel is scaled down, enable Supabase Cron in the EXISTING Supabase project, then run database/setup_reservation_expiry.sql once in the Supabase SQL Editor. It expires unused reservations 90 minutes after their reserved arrival time (within about one minute of the cutoff). Confirm the scheduled job in Integrations -> Cron. All app requests also check for expired reservations.
+
+IMPORTANT NOTES
+- The app requires DATABASE_URL and ADMIN_KEY on Vercel and does not silently fall back to CSV.
+- Login cookies are stateless signed tokens to work across Vercel cold starts / separate instances. They expire after 12 hours. Changing ADMIN_KEY invalidates existing signed cookies.
+- The application does not write persistent business data into the container filesystem; Supabase is the source of truth.
+- Vercel containers scale down when idle, so the Java process cannot guarantee a background thread will run between requests. The included Supabase Cron job is what performs 90-minute reservation expiry while the web service is idle.
+- Vercel Hobby and Supabase Free may be sufficient for a student demonstration within the current quotas, but scale-to-zero, provider limits, and the lack of automatic backups on some free tiers mean they do not guarantee uninterrupted production availability. Export your Supabase data regularly and test restores.
+- This package has been tested locally, but it cannot be deployed to your personal Vercel account from this ZIP alone. You must import the repository and enter the private environment variables above.
+
+Current provider documentation:
+https://vercel.com/kb/guide/docker
+https://vercel.com/docs/environment-variables/system-environment-variables
+https://vercel.com/docs/functions/limitations
+https://supabase.com/pricing

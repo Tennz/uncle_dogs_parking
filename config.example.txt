@@ -1,0 +1,13 @@
+# Example local configuration only. Copy this to config.txt for local use.
+# Never upload config.txt or real credentials to GitHub.
+# Enable CSV fallback only for a temporary local/LAN test; it does not sync to Supabase.
+PORT=8080
+BASE_URL=
+ADMIN_KEY=
+DATABASE_URL=
+DATABASE_USER=
+DATABASE_PASSWORD=
+DATA_DIR=data
+SHOW_SWING=true
+OPEN_BROWSER=false
+ALLOW_LOCAL_CSV_FALLBACK=false

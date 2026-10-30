@@ -1,0 +1,45 @@
+UNCLE DOGS PARKING · CHANGELOG
+
+Version 1.8.3
+- Added guarded Supabase pooler fallback: if a shared session-pooler connection fails due to connectivity/SSL errors, try the shared transaction pooler at port 6543 with JDBC server-side prepared statements disabled.
+- Added check-supabase.bat / check-supabase.ps1 to diagnose DNS and TCP reachability without reading or displaying passwords.
+- Added opt-in ALLOW_LOCAL_CSV_FALLBACK for temporary LAN UI testing only. The choice is explicit, disabled by default, never used by Vercel, and a prominent web warning explains that local changes are not synced to Supabase.
+- Updated run.sh to prompt for a missing database password without echoing the input.
+- Improved startup diagnostics and phone/LAN troubleshooting instructions.
+- Preserved existing schema, user accounts, reservations, visit history, admin key, feedback, CSV export, and reservation expiry behavior.
+
+UNCLE DOGS PARKING — CHANGELOG
+
+Version 1.8.3
+- Improved LAN IPv4 detection, prioritizing Wi-Fi/Ethernet adapters and printing other usable LAN addresses.
+- Added allow-lan.bat / allow-lan.ps1 to create a Windows Firewall rule scoped to the local subnet for the configured TCP port.
+- Added a local health-check URL and clear guidance when the server cannot start because Supabase is unreachable; the app still never silently switches to CSV.
+- Local maintenance now checks reservation expiration every 30 seconds and expires unused reservations exactly at or after reserved_at + 90 minutes.
+- Added database/setup_reservation_expiry.sql to schedule expiration in the existing Supabase project every minute when Vercel containers are idle.
+- LAN requests now generate QR links using the private host that the phone actually opened, while localhost on the PC still prints usable LAN links.
+- Compile scripts target Java 17 bytecode explicitly.
+
+Version 1.8.1
+- Added an admin-only Export all visits · CSV download.
+- CSV includes every active and completed parking visit with visit ID, slot, account ID, account name/email, plate, vehicle type, entry/exit timestamps, duration, session status, and reservation reference.
+- Export uses the same storage interface for Supabase PostgreSQL and local CSV mode; no extra database setup is required.
+- Requires an authenticated admin session and returns an Excel-friendly UTF-8 CSV attachment. User-controlled text is escaped and spreadsheet-formula prefixes are neutralized.
+
+
+Version 1.8.0
+- Added Vercel container deployment using Dockerfile.vercel and environment-based Supabase configuration.
+- Added signed stateless user/admin cookies so sessions can survive cold starts and multiple container instances.
+- Added cloud deployment safeguards: Vercel refuses to start without DATABASE_URL and ADMIN_KEY rather than silently falling back to local CSV storage.
+- Detects the public Vercel HTTPS hostname for website links, QR codes, and secure cookies.
+- Kept the local Windows/Linux launchers and CSV testing mode.
+- Retained the v1.7.0 UI polish and feedback inbox.
+
+Version 1.7.0
+- Added authenticated user feedback submission with category, 1–5 rating, message validation, and a feedback reference number.
+- Added admin-only web feedback inbox with NEW, REVIEWING, RESOLVED, and DISMISSED statuses and private admin notes.
+- Added PostgreSQL table/index creation for udp_feedback and CSV persistence in data/feedback.csv for local mode.
+- Added skeleton loading, shimmer placeholders, smooth UI transitions, loading states, and reduced-motion accessibility.
+- Improved Swing admin layout with Feedback Inbox, Refresh, Open Website, Copy URL, Add Slot, safe enable/disable/delete actions, and manual check-out controls.
+- Moved Swing database operations to background workers to avoid freezing the event-dispatch thread.
+- Added tests for authenticated feedback submission, admin-only read/update permissions, feedback persistence, and CSV reload.
+- Preserved login, reservations, QR entry/exit, Supabase configuration behavior, slot status rules, and logo assets.
