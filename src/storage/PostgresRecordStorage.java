@@ -115,11 +115,7 @@ public final class PostgresRecordStorage implements RecordStorage {
                 logConnectionFailure(transactionFallbackUrl, fallbackFailure);
                 firstFailure.addSuppressed(fallbackFailure);
                 throw new SQLException(
-                        "Supabase could not be reached on either shared pooler port 5432 or 6543. " +
-                        "Verify the host and username in Supabase Connect > Connection String > URI, " +
-                        "confirm the Supabase project is not paused (Dashboard > Settings > Paused), " +
-                        "then check Vercel Environment Variables for DATABASE_URL, DATABASE_USER, DATABASE_PASSWORD. " +
-                        "The password was not validated because the network or SSL handshake did not complete.",
+                        buildCombinedFailureMessage(firstFailure, fallbackFailure),
                         firstFailure.getSQLState(), firstFailure.getErrorCode(), firstFailure);
             }
         }
@@ -161,7 +157,14 @@ public final class PostgresRecordStorage implements RecordStorage {
         // No network exception in chain; inspect the SQLState for the cause category.
         String state = e.getSQLState();
         String msg = e.getMessage() == null ? "(no message)" : e.getMessage();
-        if ("28P01".equals(state) || "28000".equals(state)) {
+        if ("08004".equals(state)) {
+            System.err.println("[DB] DIAGNOSIS: Server rejected connection — DATABASE_PASSWORD is missing or empty.");
+            System.err.println("[DB] Supabase requires SCRAM-SHA-256 authentication; a blank password is never accepted.");
+            System.err.println("[DB] ACTION: In the Vercel dashboard → Settings → Environment Variables, set DATABASE_PASSWORD");
+            System.err.println("[DB]   to your Supabase database password, then redeploy. Find it at:");
+            System.err.println("[DB]   Supabase Dashboard → Settings → Database → Connection string (the 'password' field).");
+            System.err.println("[DB] Detail: " + msg);
+        } else if ("28P01".equals(state) || "28000".equals(state)) {
             System.err.println("[DB] DIAGNOSIS: Authentication failed — DATABASE_USER or DATABASE_PASSWORD is wrong.");
             System.err.println("[DB] Use the Supabase pooler username (e.g. postgres.abcdefgh) from Dashboard > Connect > URI.");
             System.err.println("[DB] SQLState: " + state);
@@ -198,13 +201,35 @@ public final class PostgresRecordStorage implements RecordStorage {
         }
     }
 
+    private static String buildCombinedFailureMessage(SQLException first, SQLException second) {
+        String state = first.getSQLState();
+        if ("08004".equals(state) || "08004".equals(second.getSQLState())) {
+            return "Supabase rejected the connection because DATABASE_PASSWORD is missing or empty. " +
+                   "Go to Vercel dashboard → Settings → Environment Variables and set DATABASE_PASSWORD " +
+                   "to your Supabase database password (find it at Supabase Dashboard → Settings → Database). " +
+                   "Then redeploy.";
+        }
+        if ("28P01".equals(state) || "28000".equals(state)) {
+            return "Supabase authentication failed — DATABASE_USER or DATABASE_PASSWORD is wrong. " +
+                   "Use the Supabase pooler username (e.g. postgres.projectref) from Dashboard > Connect > URI.";
+        }
+        return "Supabase could not be reached on either shared pooler port 5432 or 6543. " +
+               "Verify the host and username in Supabase Connect > Connection String > URI, " +
+               "confirm the Supabase project is not paused (Dashboard > Settings > Paused), " +
+               "then check Vercel Environment Variables for DATABASE_URL, DATABASE_USER, DATABASE_PASSWORD.";
+    }
+
     private static boolean isConnectivityFailure(SQLException error) {
         for (Throwable t = error; t != null; t = t.getCause()) {
             if (t instanceof SocketTimeoutException || t instanceof ConnectException ||
                     t instanceof UnknownHostException || t instanceof NoRouteToHostException) return true;
         }
         String state = error.getSQLState();
-        return state != null && state.startsWith("08");
+        if (state == null) return false;
+        // 08004 = server_rejected_establishment_of_sqlconnection — this is an auth/config issue,
+        // NOT a network failure. A blank password for SCRAM auth triggers 08004 from the JDBC driver.
+        // Only true network/SSL states are: 08000, 08001, 08006, 08S01.
+        return "08000".equals(state) || "08001".equals(state) || "08006".equals(state) || "08S01".equals(state);
     }
 
     @Override public boolean isRemoteDatabase() { return true; }

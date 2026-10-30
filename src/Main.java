@@ -82,7 +82,7 @@ public final class Main {
             if(!vercelDeployment)startReservationExpiryMaintenance(lot);
             System.out.println();
             System.out.println("===============================================");
-            System.out.println(" Uncle Dogs Parking is running · Version 1.8.4");
+            System.out.println(" Uncle Dogs Parking is running · Version 1.8.5");
             if(baseUrl.isBlank()&&vercelDeployment)System.out.println(" Public URL: detected from the HTTPS request hostname");
             else System.out.println(" Website base URL: "+baseUrl);
             if(!vercelDeployment){
